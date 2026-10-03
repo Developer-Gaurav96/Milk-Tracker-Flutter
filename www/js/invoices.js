@@ -141,7 +141,9 @@
     // Build the ordered set: every month with data, always including the
     // calendar's current month even when it is still empty.
     var months = MDT.monthsWithData();
-    if (months.indexOf(ym) === -1) months.unshift(ym);
+    // Keep an empty current month visible, but never resurrect a month the
+    // user deleted — its card should stay gone.
+    if (months.indexOf(ym) === -1 && !MDT.isMonthDeleted(ym)) months.unshift(ym);
     months.sort().reverse();
 
     els.monthCount.textContent = months.length === 1 ? '1 month' : months.length + ' months';

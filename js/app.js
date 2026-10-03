@@ -111,7 +111,7 @@
     window.addEventListener('resize', function () {
       var active = document.querySelector('.seg-btn[data-tab="' + currentTab + '"]');
       if (active) movePill(active);
-    });
+    }, { passive: true });
     window.addEventListener('load', function () {
       var active = document.querySelector('.seg-btn[data-tab="' + currentTab + '"]');
       if (active) movePill(active);

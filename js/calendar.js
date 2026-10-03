@@ -139,7 +139,7 @@
       var cell = ev.target.closest('.cal-cell');
       if (!cell || !cell.dataset.date) return;
       MDT.openModal(cell.dataset.date);
-    });
+    }, { passive: true });
 
     render();
   };

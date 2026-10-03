@@ -98,12 +98,22 @@ MDT.monthLabel = function (ym) {
 
 /* ---------- entries ---------- */
 
+/* In-memory mirror of the entries map. localStorage is slow (JSON
+   parse/stringify per call) and the calendar renders ~37 cells plus
+   every invoice card on each repaint, so reads are served from here
+   and writes flush through to storage once. */
+var entriesCache = null;
+
 MDT.entries = function () {
-  var raw = MDT.read(MDT.KEYS.entries, {});
-  return (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  if (entriesCache === null) {
+    var raw = MDT.read(MDT.KEYS.entries, {});
+    entriesCache = (raw && typeof raw === 'object' && !Array.isArray(raw)) ? raw : {};
+  }
+  return entriesCache;
 };
 
 MDT.saveEntries = function (map) {
+  entriesCache = map;
   return MDT.write(MDT.KEYS.entries, map);
 };
 
@@ -168,13 +178,16 @@ MDT.monthEntries = function (ym) {
    the user worked in, even though its amount is zero. */
 MDT.monthsWithData = function () {
   var all = MDT.entries();
+  var deleted = MDT.deletedMap();
   var seen = {};
   Object.keys(all).forEach(function (key) {
     var e = all[key];
     if (!e) return;
+    var ym = key.slice(0, 7);
+    if (deleted[ym] === true) return;          // skip fully deleted months
     var hasPackets = (Number(e.milk) || 0) > 0 || (Number(e.dahi) || 0) > 0;
     if (!hasPackets && e.absent !== true) return;
-    seen[key.slice(0, 7)] = true;
+    seen[ym] = true;
   });
   return Object.keys(seen).sort().reverse();
 };
