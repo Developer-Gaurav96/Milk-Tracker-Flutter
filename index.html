@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en" class="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="description" content="Track daily milk and dahi packets, review monthly invoices, and export itemised PDFs." />
+
+<!-- PWA / installability -->
+<link rel="manifest" href="manifest.webmanifest" />
+<meta name="theme-color" content="#0F172A" media="(prefers-color-scheme: dark)" />
+<meta name="theme-color" content="#F8FAFC" media="(prefers-color-scheme: light)" />
+<meta name="color-scheme" content="light dark" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Milk &amp; Dahi" />
+<link rel="apple-touch-icon" href="assets/icon-180.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="assets/icon-192.png" />
+<link rel="icon" type="image/png" sizes="512x512" href="assets/icon-512.png" />
+
+<title>Milk &amp; Dahi Tracker</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+<!--
+  Static Tailwind build (www/css/tailwind.css), NOT the Play CDN.
+  cdn.tailwindcss.com runs a JIT compiler + MutationObserver inside the
+  WebView at runtime: every DOM change triggers a style recalc, which is
+  the single largest source of animation jank on Android. The static file
+  here is generated from the same content (index.html + js/*.js) and ships
+  zero runtime cost. Regenerate with:
+    npx tailwindcss -i input.css -o www/css/tailwind.css --minify
+  (config: darkMode 'class', fontFamily sans = system/Inter)
+-->
+<link rel="stylesheet" href="css/tailwind.css" />
+
+<!-- jsPDF is only needed when exporting an invoice PDF. Load it lazily so
+     it never blocks first paint or animation frames. -->
+<script>
+  window.__loadJsPDF = function () {
+    if (window.jspdf) return Promise.resolve();
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+      s.async = true;
+      s.onload = resolve;
+      s.onerror = function () { reject(new Error('Could not load jsPDF.')); };
+      document.head.appendChild(s);
+    });
+  };
+</script>
+
+<style>
+  :root {
+    --bg: #F8FAFC;
+    --bg-2: #EEF2F7;
+    --glass: rgba(255, 255, 255, 0.72);
+    --glass-strong: rgba(255, 255, 255, 0.86);
+    --border: rgba(15, 23, 42, 0.08);
+    --border-strong: rgba(15, 23, 42, 0.14);
+    --text: #1E293B;
+    --muted: #64748B;
+    --faint: #94A3B8;
+    --field: rgba(255, 255, 255, 0.9);
+    --accent: #0284C7;
+    --accent-soft: rgba(2, 132, 199, 0.12);
+    --glow: rgba(2, 132, 199, 0.28);
+    --dahi: #7C3AED;
+    --dahi-soft: rgba(124, 58, 237, 0.12);
+    --danger: #DC2626;
+    --shadow: 0 8px 30px rgba(15, 23, 42, 0.10);
+  }
+
+  html.dark {
+    --bg: #0F172A;
+    --bg-2: #020617;
+    --glass: rgba(255, 255, 255, 0.055);
+    --glass-strong: rgba(255, 255, 255, 0.09);
+    --border: rgba(255, 255, 255, 0.10);
+    --border-strong: rgba(255, 255, 255, 0.18);
+    --text: #E2E8F0;
+    --muted: #94A3B8;
+    --faint: #64748B;
+    --field: rgba(255, 255, 255, 0.05);
+    --accent: #38BDF8;
+    --accent-soft: rgba(56, 189, 248, 0.14);
+    --glow: rgba(56, 189, 248, 0.35);
+    --dahi: #A78BFA;
+    --dahi-soft: rgba(167, 139, 250, 0.14);
+    --danger: #F87171;
+    --shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
+  }
+
+  * { -webkit-tap-highlight-color: transparent; }
+
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    overscroll-behavior: none;
+    /* Edge-to-edge: extend background to screen edges, safe-area padding handled by app container */
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    transition: background-color .3s ease, color .3s ease;
+  }
+
+  /* The ambient gradients live on a fixed pseudo-element, not on the
+     body with `background-attachment: fixed`. The latter forces a
+     main-thread repaint of the exposed background on every scroll frame
+     in Android WebViews — a real jank source. A fixed ::before is a
+     composited layer that stays put, so scrolling never repaints it. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image:
+      radial-gradient(760px 420px at 50% -8%, var(--accent-soft), transparent 62%),
+      radial-gradient(560px 380px at 108% 4%, var(--dahi-soft), transparent 60%);
+    background-repeat: no-repeat;
+  }
+
+  .glass {
+    background: var(--glass);
+    border: 1px solid var(--border);
+    /* Saturate is the expensive half of this filter chain on Android's
+       Skia renderer; dropping it and using a shorter blur keeps the
+       frosted look while cutting per-cell compositing cost. The calendar
+       paints ~37 of these, so this matters. */
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: var(--shadow);
+  }
+
+  /* Panels and modals sit over mostly-static content — keep the heavier
+     blur for the hero surfaces where it's actually visible. */
+  .glass-strong {
+    background: var(--glass-strong);
+    backdrop-filter: blur(22px) saturate(180%);
+    -webkit-backdrop-filter: blur(22px) saturate(180%);
+  }
+
+  .hairline { border-color: var(--border); }
+  .hairline-t { border-top: 1px solid var(--border); }
+
+  .muted { color: var(--muted); }
+  .faint { color: var(--faint); }
+  .accent { color: var(--accent); }
+  .danger { color: var(--danger); }
+
+  .glow-ring { box-shadow: 0 0 0 1px var(--border), 0 0 18px var(--glow); }
+
+  .field {
+    background: var(--field);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 12px;
+    outline: none;
+    transition: border-color .18s ease, box-shadow .18s ease;
+  }
+  .field:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .field::placeholder { color: var(--faint); }
+
+  select.field option { background: var(--bg); color: var(--text); }
+
+  /* Segmented control */
+  .seg-btn {
+    position: relative;
+    transition: color .25s ease;
+    color: var(--muted);
+  }
+  .seg-btn[data-active="true"] { color: var(--accent); }
+  .seg-pill {
+    position: absolute;
+    top: 4px; bottom: 4px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    border: 1px solid var(--border);
+    box-shadow: 0 0 16px var(--glow);
+    /* Animate transform only. Animating width forces a full layout pass on
+       every frame, which stutters on low-end Android; transform and opacity
+       stay on the compositor. */
+    transition: transform .34s cubic-bezier(.34, 1.4, .5, 1);
+    will-change: transform;
+  }
+
+  /* Stepper */
+  .step-btn {
+    transition: transform .12s ease, background-color .18s ease, opacity .18s ease;
+  }
+  .step-btn:active { transform: scale(.88); }
+  .step-btn:disabled { opacity: .32; cursor: not-allowed; }
+
+  /* Calendar cell */
+  .cal-cell {
+    transition: transform .14s ease, background-color .18s ease, border-color .18s ease;
+  }
+  .cal-cell:active { transform: scale(.93); }
+  .cal-cell[data-today="true"] { border-color: var(--accent); }
+  .cal-cell[data-selected="true"] {
+    border-color: var(--accent);
+    box-shadow: 0 0 16px var(--glow);
+  }
+  /* Absent days read as deliberate rather than as "nothing recorded". */
+  .cal-cell[data-absent="true"] {
+    border-color: var(--danger);
+    background: rgba(220, 38, 38, .07);
+  }
+  .cal-cell[data-absent="true"] .tabular-nums {
+    color: var(--danger);
+    text-decoration: line-through;
+    text-decoration-thickness: 1.5px;
+  }
+
+  /* Modal spring — shared by the entry modal, the invoice preview
+     and the confirm dialog */
+  #modalRoot,
+  #invModalRoot,
+  #confirmRoot {
+    transition: opacity .3s ease;
+  }
+  #modalRoot[data-open="false"],
+  #invModalRoot[data-open="false"],
+  #confirmRoot[data-open="false"] { opacity: 0; pointer-events: none; }
+  #modalRoot[data-open="false"] .modal-panel,
+  #invModalRoot[data-open="false"] .modal-panel,
+  #confirmRoot[data-open="false"] .modal-panel {
+    transform: translateY(28px) scale(.9);
+  }
+  #modalRoot[data-open="false"] .modal-backdrop,
+  #invModalRoot[data-open="false"] .modal-backdrop,
+  #confirmRoot[data-open="false"] .modal-backdrop { opacity: 0; }
+  .modal-panel {
+    transform-origin: 50% 100%;
+    transition: transform .46s cubic-bezier(.34, 1.52, .5, 1);
+    will-change: transform, opacity;
+    backface-visibility: hidden;
+  }
+  .modal-backdrop {
+    background: rgba(2, 6, 23, .55);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    transition: opacity .3s ease;
+    will-change: transform, opacity;
+    backface-visibility: hidden;
+  }
+
+  .sheet-in {
+    animation: sheetIn .4s cubic-bezier(.34, 1.4, .5, 1) both;
+  }
+  @keyframes sheetIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .toast-in { animation: toastIn .32s cubic-bezier(.34, 1.4, .5, 1) both; }
+  @keyframes toastIn {
+    from { opacity: 0; transform: translate(-50%, 14px); }
+    to { opacity: 1; transform: translate(-50%, 0); }
+  }
+
+  .fade-swap { animation: sheetIn .28s ease both; }
+
+  input[type="time"]::-webkit-calendar-picker-indicator,
+  input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(.5); }
+  html.dark input[type="time"]::-webkit-calendar-picker-indicator,
+  html.dark input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(.85); }
+
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+  /* Confirm dialog stacks above the entry modal (z-50) and
+     the invoice preview, below the toast. */
+  #confirmRoot { z-index: 60; }
+
+  /* Toast sits above every modal layer (entry, preview,
+     confirm) so feedback isn't hidden behind an open card. */
+  #toast { z-index: 70; }
+
+  /* Toggle switch */
+  #autoToggle {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    border-radius: 9999px;
+    display: inline-flex;
+    align-items: center;
+    padding: 2px;
+    background-color: rgba(255, 255, 255, 0.15);
+    border: none;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+  }
+  #autoToggle > span {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #ffffff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    left: 2px;
+    transition: transform 0.28s ease;
+    transform: translateX(0px);
+  }
+  #autoToggle[aria-checked="true"] {
+    background-color: #10b981;
+  }
+  #autoToggle[aria-checked="true"] > span {
+    transform: translateX(20px);
+  }
+</style>
+</head>
+
+<body class="font-sans">
+
+<div class="mx-auto w-full max-w-[430px] min-h-screen px-4 pb-6" style="padding-top: max(1.5rem, env(safe-area-inset-top)); padding-bottom: max(1.5rem, env(safe-area-inset-bottom))">
+
+  <!-- ===== Header ===== -->
+  <header class="pt-6 pb-3">
+    <div class="flex items-center justify-between">
+      <div>
+        <h1 class="text-[19px] font-semibold tracking-tight leading-tight">Milk &amp; Dahi Tracker</h1>
+        <p class="text-[11px] muted mt-0.5" id="headerSub">Daily dairy log</p>
+      </div>
+      <div class="glass rounded-full px-2.5 py-1 flex items-center gap-1.5">
+        <span class="w-1.5 h-1.5 rounded-full" id="autoDot" style="background:var(--faint)"></span>
+        <span class="text-[10px] font-medium muted" id="autoLabel">Manual</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===== Floating segmented control ===== -->
+  <nav class="sticky top-3 z-30 pt-1 pb-3">
+    <div class="glass rounded-full p-1 relative flex" id="segControl">
+      <div class="seg-pill" id="segPill" style="left:4px; width:calc((100% - 8px)/3)"></div>
+      <button class="seg-btn relative z-10 flex-1 flex items-center justify-center gap-1.5 py-2 text-[12.5px] font-semibold" data-tab="calendar">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="16" rx="3"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4"/></svg>
+        Calendar
+      </button>
+      <button class="seg-btn relative z-10 flex-1 flex items-center justify-center gap-1.5 py-2 text-[12.5px] font-semibold" data-tab="invoices">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3.5h14v17l-2.3-1.6-2.3 1.6-2.4-1.6L9.6 20.5 7.3 18.9 5 20.5z"/><path d="M9 8.5h6M9 12.5h6"/></svg>
+        Invoices
+      </button>
+      <button class="seg-btn relative z-10 flex-1 flex items-center justify-center gap-1.5 py-2 text-[12.5px] font-semibold" data-tab="settings">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.3"/><circle cx="9" cy="17" r="2.3"/></svg>
+        Settings
+      </button>
+    </div>
+  </nav>
+
+  <!-- ===== Calendar panel ===== -->
+  <section data-panel="calendar">
+    <div class="glass rounded-3xl p-4">
+      <div class="flex items-center justify-between mb-3">
+        <button class="step-btn w-9 h-9 rounded-full glass flex items-center justify-center" id="prevMonth" aria-label="Previous month">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+        </button>
+        <div class="text-center">
+          <div class="text-[15px] font-semibold tracking-tight" id="calMonthLabel">—</div>
+          <button class="text-[11px] accent font-medium mt-0.5" id="todayBtn">Jump to today</button>
+        </div>
+        <button class="step-btn w-9 h-9 rounded-full glass flex items-center justify-center" id="nextMonth" aria-label="Next month">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+
+      <div class="grid grid-cols-7 gap-1 mb-1">
+        <div class="text-center text-[10px] font-semibold faint uppercase tracking-wide py-1">S</div>
+        <div class="text-center text-[10px] font-semibold faint uppercase tracking-wide py-1">M</div>
+        <div class="text-center text-[10px] font-semibold faint uppercase tracking-wide py-1">T</div>
+        <div class="text-center text-[10px] font-semibold faint uppercase tracking-wide py-1">W</div>
+        <div class="text-center text-[10px] font-semibold faint uppercase tracking-wide py-1">T</div>
+        <div class="text-center text-[10px] font-semibold faint uppercase tracking-wide py-1">F</div>
+        <div class="text-center text-[10px] font-semibold faint uppercase tracking-wide py-1">S</div>
+      </div>
+
+      <div class="grid grid-cols-7 gap-1" id="calGrid"></div>
+
+      <div class="flex items-center justify-center gap-4 mt-4 pt-3 hairline-t">
+        <span class="flex items-center gap-1.5 text-[10.5px] muted">
+          <span class="w-2 h-2 rounded-full" style="background:var(--accent)"></span> Milk
+        </span>
+        <span class="flex items-center gap-1.5 text-[10.5px] muted">
+          <span class="w-2 h-2 rounded-full" style="background:var(--dahi)"></span> Dahi
+        </span>
+        <span class="flex items-center gap-1.5 text-[10.5px] muted">
+          <span class="w-2 h-2 rounded-full" style="background:var(--faint);opacity:.45"></span> Auto-logged
+        </span>
+        <span class="flex items-center gap-1.5 text-[10.5px] muted">
+          <span class="w-3 h-[2px] rounded-full" style="background:var(--danger)"></span> Absent
+        </span>
+      </div>
+    </div>
+
+    <div class="glass rounded-3xl p-4 mt-3">
+      <div class="text-[11px] font-semibold uppercase tracking-wide muted mb-3">This month</div>
+      <div class="grid grid-cols-3 gap-2">
+        <div class="rounded-2xl p-3 text-center" style="background:var(--accent-soft)">
+          <div class="text-[19px] font-bold leading-none" id="sumMilkPackets" style="color:var(--accent)">0</div>
+          <div class="text-[10px] muted mt-1.5">Milk Packets</div>
+        </div>
+        <div class="rounded-2xl p-3 text-center" style="background:var(--dahi-soft)">
+          <div class="text-[19px] font-bold leading-none" id="sumDahiPackets" style="color:var(--dahi)">0</div>
+          <div class="text-[10px] muted mt-1.5">Dahi Packets</div>
+        </div>
+        <div class="rounded-2xl p-3 text-center" style="background:var(--glass-strong)">
+          <div class="text-[19px] font-bold leading-none" id="sumAmount">₹0</div>
+          <div class="text-[10px] muted mt-1.5">Total Amount</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== Invoices panel ===== -->
+  <section data-panel="invoices" hidden>
+    <div class="glass rounded-3xl p-4">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <div class="text-[10.5px] font-semibold uppercase tracking-wide muted">Vendor</div>
+          <div class="text-[14px] font-semibold mt-0.5 truncate" id="invVendorName">Not set</div>
+          <div class="text-[11.5px] muted mt-0.5" id="invVendorPhone">—</div>
+        </div>
+        <div class="text-right shrink-0">
+          <div class="text-[10.5px] font-semibold uppercase tracking-wide muted">Payable</div>
+          <div class="text-[20px] font-bold leading-tight mt-0.5" id="invTotal">₹0</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flex items-center justify-between mt-4 mb-2.5 px-1">
+      <div class="text-[11px] font-semibold uppercase tracking-wide muted">Monthly invoices</div>
+      <div class="text-[11px] muted" id="invMonthCount">—</div>
+    </div>
+
+    <div id="invMonthList"></div>
+  </section>
+
+  <!-- ===== Settings panel ===== -->
+  <section data-panel="settings" hidden>
+    <div class="glass rounded-3xl p-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <div class="text-[13.5px] font-semibold">Daily auto-logging</div>
+          <div class="text-[11px] muted mt-0.5">Logs defaults if a day has no record</div>
+        </div>
+        <button id="autoToggle" role="switch" aria-checked="false">
+          <span></span>
+        </button>
+      </div>
+      <div class="hairline-t mt-4 pt-4 grid grid-cols-2 gap-3">
+        <label class="block col-span-2">
+          <span class="text-[11px] font-medium muted">Trigger time</span>
+          <input type="time" id="setAutoTime" class="field w-full px-3 py-2.5 text-[13px] mt-1.5" />
+        </label>
+        <label class="block">
+          <span class="text-[11px] font-medium muted">Milk price / packet</span>
+          <input type="number" id="setMilkPrice" min="0" step="0.5" class="field w-full px-3 py-2.5 text-[13px] mt-1.5" />
+        </label>
+        <label class="block">
+          <span class="text-[11px] font-medium muted">Default milk packets</span>
+          <input type="number" id="setMilkPackets" min="0" step="1" class="field w-full px-3 py-2.5 text-[13px] mt-1.5" />
+        </label>
+        <label class="block">
+          <span class="text-[11px] font-medium muted">Dahi price / packet</span>
+          <input type="number" id="setDahiPrice" min="0" step="0.5" class="field w-full px-3 py-2.5 text-[13px] mt-1.5" />
+        </label>
+        <label class="block">
+          <span class="text-[11px] font-medium muted">Default dahi packets</span>
+          <input type="number" id="setDahiPackets" min="0" step="1" class="field w-full px-3 py-2.5 text-[13px] mt-1.5" />
+        </label>
+      </div>
+    </div>
+
+    <div class="glass rounded-3xl p-4 mt-3">
+      <div class="text-[11px] font-semibold uppercase tracking-wide muted mb-3">Vendor profile</div>
+      <div class="space-y-3">
+        <label class="block">
+          <span class="text-[11px] font-medium muted">Milkman name</span>
+          <input type="text" id="setVendorName" placeholder="e.g. Ramesh Kumar" class="field w-full px-3 py-2.5 text-[13px] mt-1.5" />
+        </label>
+        <label class="block">
+          <span class="text-[11px] font-medium muted">Phone number</span>
+          <input type="tel" id="setVendorPhone" placeholder="e.g. 98765 43210" class="field w-full px-3 py-2.5 text-[13px] mt-1.5" />
+        </label>
+      </div>
+      <p class="text-[10.5px] faint mt-3 leading-relaxed">Printed on every generated invoice PDF.</p>
+    </div>
+
+    <div class="glass rounded-3xl p-4 mt-3">
+      <div class="text-[11px] font-semibold uppercase tracking-wide muted mb-3">Appearance</div>
+      <div class="grid grid-cols-2 gap-2 p-1 rounded-2xl" style="background:var(--field)">
+        <button data-theme-opt="light" class="theme-opt step-btn rounded-xl py-2.5 text-[12.5px] font-semibold transition flex items-center justify-center gap-1.5">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.2M12 19.8V22M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2 12h2.2M19.8 12H22M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/></svg>
+          Light
+        </button>
+        <button data-theme-opt="dark" class="theme-opt step-btn rounded-xl py-2.5 text-[12.5px] font-semibold transition flex items-center justify-center gap-1.5">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14.3A8.6 8.6 0 0 1 9.7 3.5a8.6 8.6 0 1 0 10.8 10.8z"/></svg>
+          Dark
+        </button>
+      </div>
+    </div>
+
+    <div class="glass rounded-3xl p-3.5 mt-3">
+      <div class="flex items-center gap-2 mb-3">
+        <div class="flex-1 text-center">
+          <div class="text-[15px] font-bold leading-none" id="dockMilk" style="color:var(--accent)">0</div>
+          <div class="text-[9.5px] muted mt-1">Milk</div>
+        </div>
+        <div class="w-px h-8" style="background:var(--border)"></div>
+        <div class="flex-1 text-center">
+          <div class="text-[15px] font-bold leading-none" id="dockDahi" style="color:var(--dahi)">0</div>
+          <div class="text-[9.5px] muted mt-1">Dahi</div>
+        </div>
+        <div class="w-px h-8" style="background:var(--border)"></div>
+        <div class="flex-1 text-center">
+          <div class="text-[15px] font-bold leading-none" id="dockAmount">₹0</div>
+          <div class="text-[9.5px] muted mt-1">Amount</div>
+        </div>
+      </div>
+      <button id="dockExport" class="w-full py-3 rounded-2xl text-[13px] font-semibold text-white transition active:scale-[.98] glow-ring flex items-center justify-center gap-2" style="background:linear-gradient(135deg,var(--accent),var(--dahi))">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v11M7.5 10.5L12 15l4.5-4.5M4.5 19.5h15"/></svg>
+        Export Invoice PDF
+      </button>
+    </div>
+
+    <div class="glass rounded-3xl p-4 mt-3">
+      <div class="text-[11px] font-semibold uppercase tracking-wide muted mb-3">Data</div>
+      <div class="space-y-2">
+        <button id="btnExportBackup" class="w-full flex items-center justify-center gap-2 py-3 rounded-2xl field text-[12.5px] font-semibold transition active:scale-[.98]">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v11M7.5 10.5L12 15l4.5-4.5M4.5 19.5h15"/></svg>
+          Export Backup (JSON)
+        </button>
+        <button id="btnImportBackup" class="w-full flex items-center justify-center gap-2 py-3 rounded-2xl field text-[12.5px] font-semibold transition active:scale-[.98]">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 14.5v-11M7.5 7.5L12 3l4.5 4.5M4.5 19.5h15"/></svg>
+          Import Backup (JSON)
+        </button>
+        <button id="btnResetMonth" class="w-full flex items-center justify-center gap-2 py-3 rounded-2xl text-[12.5px] font-semibold transition active:scale-[.98]" style="background:rgba(220,38,38,.12);color:var(--danger)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V4.8h5V7M6.4 7l.9 12.2A1.8 1.8 0 0 0 9.1 21h5.8a1.8 1.8 0 0 0 1.8-1.8L17.6 7"/></svg>
+          Reset Month Data
+        </button>
+      </div>
+      <input type="file" id="importFile" accept="application/json,.json" hidden />
+      <p class="text-[10.5px] faint mt-3 leading-relaxed">Everything is stored locally in this browser. Reset clears entries for the month currently shown in the calendar.</p>
+    </div>
+  </section>
+</div>
+
+<!-- ===== Spring modal ===== -->
+<div id="modalRoot" data-open="false" class="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+  <div class="modal-backdrop absolute inset-0" data-close></div>
+  <div class="modal-panel relative w-full max-w-[430px] px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+    <div class="glass glass-strong rounded-3xl p-5 max-h-[88vh] overflow-y-auto no-scrollbar">
+      <div class="flex items-start justify-between mb-5">
+        <div>
+          <div class="text-[10.5px] font-semibold uppercase tracking-wide muted">Daily entry</div>
+          <h2 class="text-[17px] font-semibold tracking-tight mt-0.5" id="modalDate">—</h2>
+        </div>
+        <button class="step-btn w-8 h-8 rounded-full glass flex items-center justify-center shrink-0" data-close aria-label="Close">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"><path d="M5 5l14 14M19 5L5 19"/></svg>
+        </button>
+      </div>
+
+      <div id="modalAutoNote" class="hidden rounded-2xl px-3 py-2.5 mb-3 text-[11px] leading-relaxed" style="background:var(--glass-strong);color:var(--muted)"></div>
+
+      <button id="absentBtn" type="button" data-on="false" aria-pressed="false" class="step-btn w-full mb-3 flex items-center justify-center gap-2 px-3 py-2.5 rounded-2xl text-[11.5px] font-semibold transition" style="background:var(--field);border:1px solid var(--border);color:var(--muted)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M6.5 6.5l11 11"/></svg>
+        <span id="absentLabel">Mark Absent / No Delivery</span>
+      </button>
+
+      <div class="space-y-3">
+        <!-- Milk -->
+        <div class="rounded-2xl p-3.5" style="background:var(--accent-soft)">
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full" style="background:var(--accent)"></span>
+              <span class="text-[13px] font-semibold">Milk Packets</span>
+            </div>
+            <div class="flex items-center gap-2.5">
+              <button class="step-btn w-8 h-8 rounded-full flex items-center justify-center bg-white/25" data-step="milk:-1" aria-label="Decrease milk">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h14"/></svg>
+              </button>
+              <span class="text-[17px] font-bold w-6 text-center tabular-nums" id="modalMilk">0</span>
+              <button class="step-btn w-8 h-8 rounded-full flex items-center justify-center bg-white/25" data-step="milk:1" aria-label="Increase milk">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] muted">Unit price</span>
+            <div class="flex items-center gap-1.5">
+              <span class="text-[12px] muted">₹</span>
+              <input type="number" id="modalMilkPrice" min="0" step="0.5" class="field w-24 px-2.5 py-1.5 text-[13px] text-right tabular-nums" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Dahi -->
+        <div class="rounded-2xl p-3.5" style="background:var(--dahi-soft)">
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full" style="background:var(--dahi)"></span>
+              <span class="text-[13px] font-semibold">Dahi Packets</span>
+            </div>
+            <div class="flex items-center gap-2.5">
+              <button class="step-btn w-8 h-8 rounded-full flex items-center justify-center bg-white/25" data-step="dahi:-1" aria-label="Decrease dahi">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h14"/></svg>
+              </button>
+              <span class="text-[17px] font-bold w-6 text-center tabular-nums" id="modalDahi">0</span>
+              <button class="step-btn w-8 h-8 rounded-full flex items-center justify-center bg-white/25" data-step="dahi:1" aria-label="Increase dahi">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] muted">Unit price</span>
+            <div class="flex items-center gap-1.5">
+              <span class="text-[12px] muted">₹</span>
+              <input type="number" id="modalDahiPrice" min="0" step="0.5" class="field w-24 px-2.5 py-1.5 text-[13px] text-right tabular-nums" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="rounded-2xl px-4 py-3 mt-3 flex items-center justify-between" style="background:var(--glass-strong)">
+        <span class="text-[12px] font-medium muted">Day total</span>
+        <span class="text-[17px] font-bold tabular-nums" id="modalTotal">₹0</span>
+      </div>
+
+      <div class="flex gap-2 mt-4">
+        <button id="modalDelete" class="hidden px-4 py-3 rounded-2xl text-[12.5px] font-semibold transition active:scale-[.98]" style="background:rgba(220,38,38,.12);color:var(--danger)">Delete</button>
+        <button id="modalSave" class="flex-1 py-3 rounded-2xl text-[13px] font-semibold text-white transition active:scale-[.98] glow-ring" style="background:linear-gradient(135deg,var(--accent),var(--dahi))">Save Entry</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Month preview modal ===== -->
+<div id="invModalRoot" data-open="false" class="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+  <div class="modal-backdrop absolute inset-0" data-close></div>
+  <div class="modal-panel relative w-full max-w-[430px] px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+    <div class="glass glass-strong rounded-3xl p-5 max-h-[88vh] overflow-y-auto no-scrollbar">
+      <div class="flex items-start justify-between mb-4">
+        <div>
+          <div class="text-[10.5px] font-semibold uppercase tracking-wide muted" id="pvLabel">Invoice preview</div>
+          <h2 class="text-[17px] font-semibold tracking-tight mt-0.5" id="pvMonth">—</h2>
+          <div class="text-[11px] muted mt-0.5" id="pvVendor">—</div>
+        </div>
+        <button class="step-btn w-8 h-8 rounded-full glass flex items-center justify-center shrink-0" data-close aria-label="Close">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"><path d="M5 5l14 14M19 5L5 19"/></svg>
+        </button>
+      </div>
+
+      <div class="grid grid-cols-3 gap-2 mb-4">
+        <div class="rounded-2xl p-2.5 text-center" style="background:var(--accent-soft)">
+          <div class="text-[16px] font-bold leading-none" id="pvMilk" style="color:var(--accent)">0</div>
+          <div class="text-[9.5px] muted mt-1">Milk Packets</div>
+        </div>
+        <div class="rounded-2xl p-2.5 text-center" style="background:var(--dahi-soft)">
+          <div class="text-[16px] font-bold leading-none" id="pvDahi" style="color:var(--dahi)">0</div>
+          <div class="text-[9.5px] muted mt-1">Dahi Packets</div>
+        </div>
+        <div class="rounded-2xl p-2.5 text-center" style="background:var(--glass-strong)">
+          <div class="text-[16px] font-bold leading-none" id="pvAmount">₹0</div>
+          <div class="text-[9.5px] muted mt-1">Total Amount</div>
+        </div>
+      </div>
+
+      <div class="rounded-2xl overflow-hidden" style="background:var(--glass-strong)">
+        <div class="flex items-center justify-between px-3 py-2.5">
+          <div class="text-[10.5px] font-semibold uppercase tracking-wide muted">Itemised breakdown</div>
+          <div class="text-[10.5px] muted" id="pvCount">0 entries</div>
+        </div>
+        <div id="pvList" class="max-h-[38vh] overflow-y-auto no-scrollbar"></div>
+      </div>
+
+      <div class="rounded-2xl px-4 py-3 mt-3 flex items-center justify-between" style="background:var(--glass-strong)">
+        <span class="text-[12px] font-medium muted">Total payable</span>
+        <span class="text-[17px] font-bold tabular-nums" id="pvTotal">₹0</span>
+      </div>
+
+      <div class="flex gap-2 mt-3">
+        <button id="pvDeleteBtn" type="button" class="step-btn px-4 py-3 rounded-2xl text-[12.5px] font-semibold transition active:scale-[.98]" style="background:rgba(220,38,38,.12);color:var(--danger)">
+          <span class="flex items-center justify-center gap-2">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V4.8h5V7M6.4 7l.9 12.2A1.8 1.8 0 0 0 9.1 21h5.8a1.8 1.8 0 0 0 1.8-1.8L17.6 7"/></svg>
+            Delete
+          </span>
+        </button>
+        <button id="pvExportBtn" class="flex-1 flex items-center justify-center gap-2 py-3 rounded-2xl text-[13px] font-semibold text-white transition active:scale-[.98] glow-ring" style="background:linear-gradient(135deg,var(--accent),var(--dahi))">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v11M7.5 10.5L12 15l4.5-4.5M4.5 19.5h15"/></svg>
+          Export PDF
+        </button>
+      </div>
+      <p class="text-[10px] faint text-center mt-2 leading-relaxed">
+        Preview only — nothing is downloaded until you tap Export PDF.
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Confirm dialog ===== -->
+<div id="confirmRoot" data-open="false" class="fixed inset-0 flex items-end sm:items-center justify-center">
+  <div class="modal-backdrop absolute inset-0" data-confirm-close></div>
+  <div class="modal-panel relative w-full max-w-[430px] px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+    <div class="glass glass-strong rounded-3xl p-5">
+      <div class="text-[10.5px] font-semibold uppercase tracking-wide muted" id="cfLabel">Confirm</div>
+      <h2 class="text-[16px] font-semibold tracking-tight mt-1" id="cfTitle">Are you sure?</h2>
+      <p class="text-[12px] muted mt-2 leading-relaxed" id="cfMessage"></p>
+      <div class="flex gap-2 mt-4">
+        <button id="cfCancel" type="button" class="step-btn flex-1 py-3 rounded-2xl text-[13px] font-semibold transition active:scale-[.98]" style="background:var(--field);border:1px solid var(--border);color:var(--muted)">Cancel</button>
+        <button id="cfConfirm" type="button" class="step-btn flex-1 py-3 rounded-2xl text-[13px] font-semibold text-white transition active:scale-[.98]" style="background:var(--danger)">Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Toast ===== -->
+<div id="toast" class="fixed bottom-6 left-1/2 -translate-x-1/2 hidden">
+  <div class="glass glass-strong rounded-full px-4 py-2.5 text-[12px] font-medium" id="toastText"></div>
+</div>
+
+<script src="js/store.js"></script>
+<script src="js/calendar.js"></script>
+<script src="js/modal.js"></script>
+<script src="js/confirm.js"></script>
+<script src="js/invoices.js"></script>
+<script src="js/pdf.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/app.js"></script>
+<script src="js/capacitor-files.js"></script>
+<script>
+  /* Offline support. Service workers need a secure context (https or
+     localhost); over file:// this silently no-ops and the app still runs. */
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function (err) {
+        console.warn('Service worker registration skipped:', err.message);
+      });
+    });
+  }
+</script>
+</body>
+</html>
