@@ -160,6 +160,7 @@
   /* Invoice list needs a rebuild (e.g. after closing the modal or an
      import). Re-renders the grid-less parts only. */
   MDT.refreshInvoices = function () {
+    render();
     MDT.renderTotals(viewYM);
     MDT.renderInvoices(viewYM);
   };

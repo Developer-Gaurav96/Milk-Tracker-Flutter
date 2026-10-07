@@ -161,6 +161,7 @@ MDT.deleteEntry = function (dateKey) {
   var map = MDT.entries();
   delete map[dateKey];
   MDT.saveEntries(map);
+  if (typeof MDT.refreshCalendar === 'function') MDT.refreshCalendar();
 };
 
 /* Entries for a given "YYYY-MM" month, ascending by date. */
@@ -250,6 +251,7 @@ MDT.deleteMonth = function (ym) {
   var deleted = MDT.deletedMap();
   deleted[ym] = true;
   MDT.write(MDT.KEYS.deleted, deleted);
+  if (typeof MDT.refreshCalendar === 'function') MDT.refreshCalendar();
 };
 
 /* ---------- settings ---------- */
